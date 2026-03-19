@@ -1,3 +1,7 @@
-# Phase 1: minimal deps for poll + DB. CrewAI/Jira in later phases.
+# Install the Crew package first (from repository root):
+#   pip install -e ./service-desk-crew
+# Then:
+#   pip install -r worker/requirements.txt
 python-dotenv>=1.0.0
 psycopg2-binary>=2.9.0
+requests>=2.28.0

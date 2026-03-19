@@ -1,0 +1,19 @@
+# POC: "Service degradation / workload unhealthy in Kubernetes" (tech spec §4.2)
+request_type: k8s_service_degradation
+fields:
+  - name: namespace
+    description: Kubernetes namespace to investigate
+    required: true
+  - name: service_or_app
+    description: Service, deployment, or app name (or label selector hint)
+    required: true
+  - name: environment_or_cluster
+    description: Environment or cluster name (optional; may default)
+    required: false
+  - name: time_window
+    description: When the issue started or observation window for logs/metrics
+    required: false
+    default_hint: "last 60 minutes"
+  - name: symptom_or_error
+    description: Symptom, error text, or HTTP code (improves triage)
+    required: false

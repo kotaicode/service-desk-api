@@ -1,8 +1,10 @@
 """
-Worker: poll DB for pending jobs, claim, run skeleton processing, update status.
-Phase 1: no Jira or CrewAI; validates pipeline only. Logging per §3.5.
+Worker: poll DB for pending jobs, claim, run L1 CrewAI Flow; idempotency per §4.3. Logging per §3.5.
 """
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 import psycopg2
 from dotenv import load_dotenv
@@ -13,6 +15,26 @@ from .logger import get_logger
 load_dotenv()
 cfg = load_config()
 log = get_logger(cfg["log_level"])
+
+
+def is_processed(conn: psycopg2.extensions.connection, issue_key: str) -> bool:
+    """Return True if this issue_key already has a processed marker (idempotency)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM processed_issues WHERE issue_key = %s LIMIT 1",
+            (issue_key,),
+        )
+        return cur.fetchone() is not None
+
+
+def set_processed(conn: psycopg2.extensions.connection, issue_key: str, job_id: int) -> None:
+    """Record that this issue_key has been processed (after successful comment)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO processed_issues (issue_key, job_id) VALUES (%s, %s) ON CONFLICT (issue_key) DO UPDATE SET processed_at = now(), job_id = EXCLUDED.job_id",
+            (issue_key, job_id),
+        )
+    conn.commit()
 
 
 def get_pending_job(conn: psycopg2.extensions.connection):
@@ -43,9 +65,46 @@ def update_job_status(conn: psycopg2.extensions.connection, job_id: int, status:
     conn.commit()
 
 
-def process_job(job: dict) -> str:
-    """Phase 1: skeleton only. Returns 'done' or 'failed'."""
-    # No Jira or CrewAI yet; just validate the pipeline.
+def process_job(conn: psycopg2.extensions.connection, job: dict, cfg: dict) -> str:
+    """
+    Phase 3: idempotency check, then L1 CrewAI Flow (service_desk_crew); mark processed after success.
+    Returns 'done', 'skipped' (idempotency), or 'failed'.
+    """
+    job_id = job["id"]
+    issue_key = job["issue_key"]
+
+    if is_processed(conn, issue_key):
+        log.warning("idempotency skip job_id=%s issue_key=%s", job_id, issue_key)
+        return "skipped"
+
+    base_url = cfg.get("jira_base_url") or ""
+    api_token = cfg.get("jira_api_token") or ""
+    email = cfg.get("jira_email") or ""
+    if not base_url or not api_token or not email:
+        log.error("job_id=%s issue_key=%s Jira credentials missing (JIRA_BASE_URL, JIRA_API_TOKEN, JIRA_EMAIL)", job_id, issue_key)
+        return "failed"
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        log.error("job_id=%s issue_key=%s OPENAI_API_KEY missing (required for CrewAI LLM)", job_id, issue_key)
+        return "failed"
+
+    from service_desk_crew.main import run_l1_support
+
+    timeout = cfg.get("flow_timeout_seconds", 900)
+    log.info("flow start job_id=%s issue_key=%s timeout_seconds=%s", job_id, issue_key, timeout)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(run_l1_support, issue_key, job_id)
+            fut.result(timeout=timeout)
+    except FuturesTimeout:
+        log.error("job_id=%s issue_key=%s flow timeout after %s seconds", job_id, issue_key, timeout)
+        return "failed"
+    except Exception as e:
+        log.error("job_id=%s issue_key=%s flow failed error=%s", job_id, issue_key, e)
+        return "failed"
+
+    log.info("flow end comment posted job_id=%s issue_key=%s", job_id, issue_key)
+    set_processed(conn, issue_key, job_id)
     return "done"
 
 
@@ -59,7 +118,7 @@ def run_once(conn: psycopg2.extensions.connection) -> bool:
         return False  # another worker claimed it
     log.info("job claimed job_id=%s issue_key=%s", job_id, issue_key)
     try:
-        status = process_job(job)
+        status = process_job(conn, job, cfg)
         update_job_status(conn, job_id, status)
         log.info("job completed job_id=%s issue_key=%s status=%s", job_id, issue_key, status)
     except Exception as e:

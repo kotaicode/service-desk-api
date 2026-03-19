@@ -2,13 +2,18 @@
 
 Go API and Python worker for the Service Desk POC — L1 support automation (Jira webhook → queue → CrewAI flow). This repo implements the **webhook receiver** and **worker** as per the Service Desk POC Technical Specification.
 
-**Phase 1 (Foundation):** Webhook → validate secret → store job in DB → worker polls, claims, and processes jobs. No Jira API or CrewAI yet; single env contract and logging.
+**Phase 1 (Foundation):** Webhook → validate secret → store job in DB → worker polls, claims, and processes jobs. Single env contract and logging.
+
+**Phase 2 (Jira and idempotency):** ~~Minimal comment-only path~~ superseded by Phase 3.
+
+**Phase 3 (CrewAI Flow):** Installable package `service_desk_crew` under `service-desk-crew/` (from `crewai create crew service_desk_crew`). The worker runs `L1SupportFlow`: load ticket → Intake → route (missing info / unsupported / K8s) → diagnostics stub → Synthesis → internal Jira comment. Jira integration lives in `service-desk-crew/src/service_desk_crew/tools/jira.py`. Repo-root `config/required_fields.yml` and `config/routing.yml` drive intake and “k8s-ish” routing. Idempotency unchanged: `processed_issues` after a successful flow (comment posted).
 
 ## Architecture
 
-- **Go API:** Receives Jira webhook at `POST /webhook/jira`, validates `X-Webhook-Secret`, parses `issue_key` from body, inserts a job into the database, returns 200.
-- **Database:** PostgreSQL (`DATABASE_URL`); jobs table with `id`, `issue_key`, `status`, `payload`, `created_at`, `updated_at`.
-- **Worker (Python):** Polls for `pending` jobs, claims one (sets `processing`), runs skeleton processing, sets `done` or `failed`. Later phases add CrewAI and Jira.
+- **Go API:** Receives Jira webhook at `POST /webhook/jira`, validates `X-Webhook-Secret`, parses `issue_key` from body, inserts a job into the database, returns 200. Uses only `WEBHOOK_SECRET`, `DATABASE_URL`, `LOG_LEVEL`.
+- **Database:** PostgreSQL (`DATABASE_URL`); `jobs` table (queue); `processed_issues` table (idempotency by `issue_key`).
+- **Worker (Python):** Polls for `pending` jobs, claims one, checks idempotency (skip if already processed), runs **`service_desk_crew`** L1 flow (CrewAI + LLM), then marks processed if the flow completed without error. Uses `JIRA_*`, `OPENAI_API_KEY`, optional `OPENAI_MODEL_NAME`, `FLOW_TIMEOUT_SECONDS`, and `DATABASE_URL` from env.
+- **`service-desk-crew/`:** CrewAI project (`pip install -e ./service-desk-crew` from repo root). CLI: `cd service-desk-crew && crewai run` (uses `SERVICE_DESK_ISSUE_KEY` or demo key — requires Jira + OpenAI env).
 
 Configuration is **env-only** (§3.8): same variable names locally (`.env`) and on cluster (Kubernetes Secrets). No code fork.
 
@@ -25,18 +30,23 @@ Configuration is **env-only** (§3.8): same variable names locally (`.env`) and 
    ```sh
    createdb service_desk   # or use your existing DB
    cp .env.example .env
-   # Edit .env: set WEBHOOK_SECRET (required), set DATABASE_URL and LOG_LEVEL if needed.
+   # Edit .env: set WEBHOOK_SECRET (required), DATABASE_URL, LOG_LEVEL.
+   # For Phase 2+: set JIRA_BASE_URL, JIRA_API_TOKEN, JIRA_EMAIL (worker only).
+   # For Phase 3+: set OPENAI_API_KEY (and optionally OPENAI_MODEL_NAME).
    ```
 
-2. Install Go deps and run migrations (migrations run on API startup):
+2. Install Go deps. Run the API once so migrations run (creates `jobs` and `processed_issues` tables):
    ```sh
    go mod tidy
+   go run .   # then Ctrl+C; or run API and worker as below
    ```
 
-3. Install Python deps for the worker:
+3. Install the CrewAI package and worker deps (from **repository root**):
    ```sh
-   cd worker && pip install -r requirements.txt && cd ..
+   pip install -e ./service-desk-crew
+   pip install -r worker/requirements.txt
    ```
+   The editable install exposes `import service_desk_crew` to the worker process.
 
 ## Run locally
 
@@ -50,7 +60,7 @@ Configuration is **env-only** (§3.8): same variable names locally (`.env`) and 
    ```sh
    python -m worker
    ```
-   Worker reads `DATABASE_URL` and `LOG_LEVEL` from env, polls every 15s by default.
+   Worker reads `DATABASE_URL`, `LOG_LEVEL`, `JIRA_*`, `OPENAI_API_KEY`, and optional `FLOW_TIMEOUT_SECONDS` from env; polls every 15s by default.
 
 ## Smoke tests
 
@@ -84,6 +94,13 @@ curl -X POST http://localhost:8080/webhook/jira \
 ```
 
 Expect `401` and no new job in the database.
+
+### 4. Phase 2–3: Jira, LLM, idempotency
+
+- Set `JIRA_BASE_URL`, `JIRA_API_TOKEN`, `JIRA_EMAIL`, and **`OPENAI_API_KEY`** in `.env`. Ensure the Jira user can read the issue and add internal comments.
+- Create a job for a real issue key. Run the worker; it should run the L1 flow and post an **internal comment** (missing-info request, unsupported notice, or full synthesis on the K8s path — depending on ticket text and intake).
+- Create a **second** job for the **same** `issue_key`. The worker should log **idempotency skip** (WARN) and not post again; job status `skipped`.
+- Invalid Jira credentials or missing `OPENAI_API_KEY` should yield ERROR and job `failed` without updating `processed_issues`.
 
 ## Endpoints
 
@@ -167,7 +184,8 @@ Note the **HTTPS Forwarding** URL (e.g. `https://abc123.ngrok-free.app`).
 ├── api/           # Go HTTP handlers (webhook, ping, health)
 ├── config/        # Env-only config
 ├── db/            # PostgreSQL connection, migrations, job operations
-├── worker/        # Python worker (poll, claim, process)
+├── worker/        # Python worker (poll, claim, process, Jira)
+│   └── tools/     # Jira get/post; later MCP wrappers
 ├── main.go
 ├── .env.example
 ├── .gitignore

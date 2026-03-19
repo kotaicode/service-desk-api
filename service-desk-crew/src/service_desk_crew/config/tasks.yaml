@@ -1,0 +1,57 @@
+intake_task:
+  description: >
+    Ticket issue key: {issue_key}
+
+    Required-fields policy (YAML):
+    {required_fields_yaml}
+
+    Ticket content:
+    {ticket_context}
+
+    Return ONLY a single JSON object (no markdown fences) with keys:
+    can_proceed (boolean),
+    missing_fields (array of strings),
+    clarifying_questions (array of strings),
+    namespace (string or empty),
+    service_name (string or empty),
+    cluster_env (string or empty),
+    time_window (string or empty),
+    symptoms (string or empty).
+
+    Rules: can_proceed is true only if namespace and service_name are present with enough
+    specificity to scope Kubernetes diagnostics. Otherwise false and list missing_fields.
+  expected_output: >
+    Raw JSON only, one object, matching the schema described above.
+  agent: intake_specialist
+
+diagnostics_task:
+  description: >
+    Issue key: {issue_key}
+    Namespace: {namespace}
+    Service / workload: {service_name}
+
+    Call the tool run_kubernetes_diagnostics_stub exactly once with these values.
+    Return the tool output verbatim as your final answer (add no extra commentary).
+  expected_output: >
+    Verbatim stub diagnostic bundle text from the tool.
+  agent: diagnostics_collector
+
+synthesis_task:
+  description: >
+    Issue key: {issue_key}
+
+    Ticket context:
+    {ticket_context}
+
+    Diagnostics artifact:
+    {diagnostics_artifact}
+
+    Write markdown for an internal Jira comment with sections:
+    ## Triage
+    ## Evidence
+    ## Likely causes
+    ## Recommended next steps
+    ## Open questions
+  expected_output: >
+    Markdown suitable for posting as an internal comment (no outer code fences).
+  agent: synthesis_writer

@@ -1,0 +1,25 @@
+# Heuristic "k8s-ish" routing for POC (tech spec §5.3–5.4)
+# If the ticket text matches any keyword (case-insensitive), treat as in-scope for K8s path.
+keywords:
+  - kubernetes
+  - k8s
+  - pod
+  - pods
+  - deployment
+  - statefulset
+  - daemonset
+  - namespace
+  - crashloop
+  - crash loop
+  - oom
+  - readiness
+  - liveness
+  - 502
+  - 503
+  - 504
+  - 5xx
+  - ingress
+  - service mesh
+  - workload
+  - container
+  - helm
