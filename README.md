@@ -93,11 +93,72 @@ Expect `401` and no new job in the database.
 | GET    | `/health`       | Health status                  |
 | POST   | `/webhook/jira` | Jira webhook (X-Webhook-Secret) |
 
-## Optional: Jira Automation + tunnel
+## Testing Jira push notifications with ngrok (localhost)
 
-1. Expose the API via ngrok: `ngrok http 8080`.
-2. In Jira Service Management: Automation rule **When request created** → **Send web request** to `https://<tunnel>/webhook/jira`, method POST, header `X-Webhook-Secret: <your secret>`, body with `issueKey` (or your payload shape).
-3. Create a test request in Jira; confirm webhook fires, API stores job, worker processes it.
+Use ngrok to expose your local API so Jira Automation can send webhooks to it.
+
+### 1. Install ngrok
+
+- **macOS (Homebrew):** `brew install ngrok`
+- **Or:** sign up at [ngrok.com](https://ngrok.com), download the binary, and add it to your PATH.
+
+### 2. Start your stack
+
+In separate terminals:
+
+```sh
+# Terminal 1: Go API
+go run .
+
+# Terminal 2: Worker
+python -m worker
+```
+
+Leave both running.
+
+### 3. Start ngrok tunnel
+
+```sh
+ngrok http 8080
+```
+
+Note the **HTTPS Forwarding** URL (e.g. `https://abc123.ngrok-free.app`).  
+**Free tier:** this URL changes each time you restart ngrok.
+
+### 4. Configure Jira Service Management Automation
+
+1. In your Jira Service Management project: **Project settings** → **Automation** (or **Apps** → **Automation**).
+2. Create a new rule:
+   - **Trigger:** **When request created** (or **When issue is created** for Jira Software).
+3. Add action: **Send web request**.
+   - **URL:** `https://<your-ngrok-url>/webhook/jira`  
+     Example: `https://abc123.ngrok-free.app/webhook/jira`
+   - **Method:** `POST`
+   - **Headers:** add one header:
+     - **Name:** `X-Webhook-Secret`
+     - **Value:** the same value as `WEBHOOK_SECRET` in your `.env`
+   - **Body:** choose **JSON** and send the issue key. For example:
+     ```json
+     {
+       "issueKey": "{{issue.key}}"
+     }
+     ```
+     (Use your project’s smart value for the issue key if different, e.g. `{{request.key}}` for JSM.)
+4. Save and enable the rule.
+
+### 5. Test
+
+1. Create a new request/issue in the project.
+2. In the ngrok terminal you should see an HTTP request to `/webhook/jira`.
+3. In the Go API terminal you should see logs: `webhook received`, `job stored` with the issue key.
+4. In the worker terminal you should see `job claimed` and `job completed` for that issue key.
+5. Optionally check the database: `psql "$DATABASE_URL" -c "SELECT id, issue_key, status FROM jobs ORDER BY id DESC LIMIT 5;"`
+
+### Troubleshooting
+
+- **401 from API:** Ensure the header `X-Webhook-Secret` in Jira exactly matches `WEBHOOK_SECRET` in `.env` (no extra spaces).
+- **URL not reachable:** Ensure ngrok is running and the URL in the Automation rule uses **https** and includes `/webhook/jira`.
+- **URL changed:** After restarting ngrok, update the webhook URL in the Jira Automation rule.
 
 ## Project layout
 
