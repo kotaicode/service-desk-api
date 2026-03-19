@@ -1,0 +1,32 @@
+# Local env and secrets — never commit
+.env
+
+# Build and binaries
+bin/
+*.exe
+service-desk-api
+
+# Local DB dumps / dev
+*.dump
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Go
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+
+# Temp
+tmp/
+*.log

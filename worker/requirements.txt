@@ -1,0 +1,3 @@
+# Phase 1: minimal deps for poll + DB. CrewAI/Jira in later phases.
+python-dotenv>=1.0.0
+psycopg2-binary>=2.9.0
