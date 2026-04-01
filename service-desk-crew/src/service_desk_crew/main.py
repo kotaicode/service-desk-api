@@ -13,12 +13,20 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 log = logging.getLogger(__name__)
 
 
-def run_l1_support(issue_key: str, job_id: int | None = None) -> Any:
-    """Run L1 CrewAI Flow for one ticket (worker calls this after claim + idempotency check)."""
+def run_l1_support(issue_key: str, job_id: int | None = None) -> str:
+    """Run L1 CrewAI Flow for one ticket (worker calls this after claim + idempotency check).
+
+    Returns a flow outcome constant from service_desk_crew.flow (e.g. full_resolution).
+    """
     from service_desk_crew.flow import L1SupportFlow
 
     flow = L1SupportFlow()
-    return flow.kickoff(inputs={"issue_key": issue_key, "job_id": job_id})
+    flow.kickoff(inputs={"issue_key": issue_key, "job_id": job_id})
+    outcome = flow.state.outcome
+    if not outcome:
+        log.error("flow finished without outcome issue_key=%s job_id=%s", issue_key, job_id)
+        raise RuntimeError("L1 flow completed without setting state.outcome")
+    return outcome
 
 
 def run() -> None:

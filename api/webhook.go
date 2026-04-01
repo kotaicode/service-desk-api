@@ -13,7 +13,7 @@ type jiraWebhookBody struct {
 }
 
 // HandleJiraWebhook handles POST /webhook/jira. Validates X-Webhook-Secret, parses
-// issue_key from body, inserts job into DB, returns 200. Logs per §3.5.
+// issue_key from body, upserts a single jobs row per issue_key (see db.UpsertJobFromWebhook).
 func (h *Handler) HandleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -59,17 +59,29 @@ func (h *Handler) HandleJiraWebhook(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Info("webhook received", "issue_key", issueKey)
 
-	jobID, err := h.db.InsertJob(r.Context(), issueKey, string(body))
+	ctx := r.Context()
+	payloadStr := string(body)
+
+	jobID, reopened, deduped, err := h.db.UpsertJobFromWebhook(ctx, issueKey, payloadStr)
 	if err != nil {
-		h.log.Error("webhook: failed to store job", "issue_key", issueKey, "error", err.Error())
+		h.log.Error("webhook: failed to upsert job", "issue_key", issueKey, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "failed to store job")
 		return
 	}
 
-	h.log.Info("job stored", "job_id", jobID, "issue_key", issueKey)
+	if reopened {
+		h.log.Info("job reopened to pending", "job_id", jobID, "issue_key", issueKey)
+	} else if deduped {
+		h.log.Info("webhook: deduped active job payload", "job_id", jobID, "issue_key", issueKey)
+	} else {
+		h.log.Info("job stored or re-queued", "job_id", jobID, "issue_key", issueKey)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,
 		"job_id":    jobID,
 		"issue_key": issueKey,
+		"reopened":  reopened,
+		"deduped":   deduped,
 	})
 }

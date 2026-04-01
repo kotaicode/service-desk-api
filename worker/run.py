@@ -1,5 +1,8 @@
 """
 Worker: poll DB for pending jobs, claim, run L1 CrewAI Flow; idempotency per §4.3. Logging per §3.5.
+
+Job terminal statuses: completed_full, awaiting_customer, completed_unsupported, skipped, failed.
+processed_issues is updated only for completed_full (full K8s + synthesis path).
 """
 import os
 import time
@@ -28,7 +31,7 @@ def is_processed(conn: psycopg2.extensions.connection, issue_key: str) -> bool:
 
 
 def set_processed(conn: psycopg2.extensions.connection, issue_key: str, job_id: int) -> None:
-    """Record that this issue_key has been processed (after successful comment)."""
+    """Record full-resolution completion for issue_key (K8s + synthesis only)."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO processed_issues (issue_key, job_id) VALUES (%s, %s) ON CONFLICT (issue_key) DO UPDATE SET processed_at = now(), job_id = EXCLUDED.job_id",
@@ -38,6 +41,7 @@ def set_processed(conn: psycopg2.extensions.connection, issue_key: str, job_id: 
 
 
 def get_pending_job(conn: psycopg2.extensions.connection):
+    """Only `pending` jobs are eligible; awaiting_customer / completed_unsupported never run until webhook resets to pending."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, issue_key, status, payload, created_at FROM jobs WHERE status = %s ORDER BY id ASC LIMIT 1",
@@ -67,14 +71,14 @@ def update_job_status(conn: psycopg2.extensions.connection, job_id: int, status:
 
 def process_job(conn: psycopg2.extensions.connection, job: dict, cfg: dict) -> str:
     """
-    Phase 3: idempotency check, then L1 CrewAI Flow (service_desk_crew); mark processed after success.
-    Returns 'done', 'skipped' (idempotency), or 'failed'.
+    Idempotency (full-resolution only), then L1 CrewAI Flow.
+    Returns job row status: completed_full, awaiting_customer, completed_unsupported, skipped, failed.
     """
     job_id = job["id"]
     issue_key = job["issue_key"]
 
     if is_processed(conn, issue_key):
-        log.warning("idempotency skip job_id=%s issue_key=%s", job_id, issue_key)
+        log.warning("idempotency skip job_id=%s issue_key=%s (already full_resolution)", job_id, issue_key)
         return "skipped"
 
     base_url = cfg.get("jira_base_url") or ""
@@ -88,6 +92,11 @@ def process_job(conn: psycopg2.extensions.connection, job: dict, cfg: dict) -> s
         log.error("job_id=%s issue_key=%s OPENAI_API_KEY missing (required for CrewAI LLM)", job_id, issue_key)
         return "failed"
 
+    from service_desk_crew.flow import (
+        FLOW_OUTCOME_AWAITING_CUSTOMER,
+        FLOW_OUTCOME_FULL_RESOLUTION,
+        FLOW_OUTCOME_UNSUPPORTED,
+    )
     from service_desk_crew.main import run_l1_support
 
     timeout = cfg.get("flow_timeout_seconds", 900)
@@ -95,7 +104,7 @@ def process_job(conn: psycopg2.extensions.connection, job: dict, cfg: dict) -> s
     try:
         with ThreadPoolExecutor(max_workers=1) as ex:
             fut = ex.submit(run_l1_support, issue_key, job_id)
-            fut.result(timeout=timeout)
+            outcome = fut.result(timeout=timeout)
     except FuturesTimeout:
         log.error("job_id=%s issue_key=%s flow timeout after %s seconds", job_id, issue_key, timeout)
         return "failed"
@@ -103,9 +112,19 @@ def process_job(conn: psycopg2.extensions.connection, job: dict, cfg: dict) -> s
         log.error("job_id=%s issue_key=%s flow failed error=%s", job_id, issue_key, e)
         return "failed"
 
-    log.info("flow end comment posted job_id=%s issue_key=%s", job_id, issue_key)
-    set_processed(conn, issue_key, job_id)
-    return "done"
+    if outcome == FLOW_OUTCOME_FULL_RESOLUTION:
+        log.info("flow end full_resolution job_id=%s issue_key=%s", job_id, issue_key)
+        set_processed(conn, issue_key, job_id)
+        return "completed_full"
+    if outcome == FLOW_OUTCOME_AWAITING_CUSTOMER:
+        log.info("flow end awaiting_customer job_id=%s issue_key=%s", job_id, issue_key)
+        return "awaiting_customer"
+    if outcome == FLOW_OUTCOME_UNSUPPORTED:
+        log.info("flow end completed_unsupported job_id=%s issue_key=%s", job_id, issue_key)
+        return "completed_unsupported"
+
+    log.error("job_id=%s issue_key=%s unexpected flow outcome=%s", job_id, issue_key, outcome)
+    return "failed"
 
 
 def run_once(conn: psycopg2.extensions.connection) -> bool:

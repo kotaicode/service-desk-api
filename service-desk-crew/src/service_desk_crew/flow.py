@@ -15,8 +15,14 @@ from service_desk_crew.tools.jira import format_ticket_for_agents, jira_get_issu
 
 log = logging.getLogger(__name__)
 
+# Terminal outcomes for worker: only FLOW_OUTCOME_FULL_RESOLUTION inserts processed_issues.
+FLOW_OUTCOME_FULL_RESOLUTION = "full_resolution"
+FLOW_OUTCOME_AWAITING_CUSTOMER = "awaiting_customer"
+FLOW_OUTCOME_UNSUPPORTED = "completed_unsupported"
+
 
 class L1State(BaseModel):
+    id: str = ""
     issue_key: str = ""
     job_id: int | None = None
     ticket_raw: str = ""
@@ -29,6 +35,7 @@ class L1State(BaseModel):
     service_name: str = ""
     diagnostics_artifact: str = ""
     synthesis_output: str = ""
+    outcome: str = ""
 
 
 def _parse_first_json_object(text: str) -> dict[str, Any]:
@@ -119,6 +126,7 @@ class L1SupportFlow(Flow[L1State]):
             lines.extend(self.state.clarifying_questions)
         body = "\n".join(lines) if lines else "Please add namespace and service/workload details for triage."
         jira_post_comment(self.state.issue_key, body, internal=True)
+        self.state.outcome = FLOW_OUTCOME_AWAITING_CUSTOMER
         return "posted_missing_info"
 
     @listen("path_unsupported")
@@ -129,6 +137,7 @@ class L1SupportFlow(Flow[L1State]):
             "For other request types, please route to your team’s standard process."
         )
         jira_post_comment(self.state.issue_key, body, internal=True)
+        self.state.outcome = FLOW_OUTCOME_UNSUPPORTED
         return "posted_unsupported"
 
     @listen("path_k8s")
@@ -175,4 +184,5 @@ class L1SupportFlow(Flow[L1State]):
     def post_final_comment(self) -> str:
         log.info("flow step post_comment issue_key=%s", self.state.issue_key)
         jira_post_comment(self.state.issue_key, self.state.synthesis_output, internal=True)
+        self.state.outcome = FLOW_OUTCOME_FULL_RESOLUTION
         return "posted_final"

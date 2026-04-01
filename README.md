@@ -6,13 +6,13 @@ Go API and Python worker for the Service Desk POC — L1 support automation (Jir
 
 **Phase 2 (Jira and idempotency):** ~~Minimal comment-only path~~ superseded by Phase 3.
 
-**Phase 3 (CrewAI Flow):** Installable package `service_desk_crew` under `service-desk-crew/` (from `crewai create crew service_desk_crew`). The worker runs `L1SupportFlow`: load ticket → Intake → route (missing info / unsupported / K8s) → diagnostics stub → Synthesis → internal Jira comment. Jira integration lives in `service-desk-crew/src/service_desk_crew/tools/jira.py`. Repo-root `config/required_fields.yml` and `config/routing.yml` drive intake and “k8s-ish” routing. Idempotency unchanged: `processed_issues` after a successful flow (comment posted).
+**Phase 3 (CrewAI Flow):** Installable package `service_desk_crew` under `service-desk-crew/` (from `crewai create crew service_desk_crew`). The worker runs `L1SupportFlow`: load ticket → Intake → route (missing info / unsupported / K8s) → diagnostics stub → Synthesis → internal Jira comment. Jira integration lives in `service-desk-crew/src/service_desk_crew/tools/jira.py`. Repo-root `config/required_fields.yml` and `config/routing.yml` drive intake and “k8s-ish” routing. **`processed_issues`** records only **full-resolution** runs (K8s path with final synthesis comment), not missing-info or unsupported branches — so another webhook for the same `issue_key` can run again after `awaiting_customer` or `completed_unsupported`.
 
 ## Architecture
 
-- **Go API:** Receives Jira webhook at `POST /webhook/jira`, validates `X-Webhook-Secret`, parses `issue_key` from body, inserts a job into the database, returns 200. Uses only `WEBHOOK_SECRET`, `DATABASE_URL`, `LOG_LEVEL`.
+- **Go API:** Receives Jira webhook at `POST /webhook/jira`, validates `X-Webhook-Secret`, parses `issue_key` from body. **`jobs` has at most one row per `issue_key`** (unique index). **`UpsertJobFromWebhook`:** first issue → insert **`pending`**; **`awaiting_customer`**, **`completed_unsupported`**, or **`failed`** → **`pending`** again (**`reopened`: true**); **`pending`** / **`processing`** → refresh payload only (**`deduped`: true**); other terminals (e.g. **`completed_full`**, **`skipped`**) → **`pending`** on the same row for another pass. Response JSON includes **`reopened`** and **`deduped`**. Uses only `WEBHOOK_SECRET`, `DATABASE_URL`, `LOG_LEVEL`.
 - **Database:** PostgreSQL (`DATABASE_URL`); `jobs` table (queue); `processed_issues` table (idempotency by `issue_key`).
-- **Worker (Python):** Polls for `pending` jobs, claims one, checks idempotency (skip if already processed), runs **`service_desk_crew`** L1 flow (CrewAI + LLM), then marks processed if the flow completed without error. Uses `JIRA_*`, `OPENAI_API_KEY`, optional `OPENAI_MODEL_NAME`, `FLOW_TIMEOUT_SECONDS`, and `DATABASE_URL` from env.
+- **Worker (Python):** Polls for `pending` jobs, claims one, checks idempotency (**skip only if `issue_key` is already in `processed_issues`**, i.e. a prior **full-resolution** run), runs **`service_desk_crew`** L1 flow, updates `jobs.status` to a terminal value (`completed_full`, `awaiting_customer`, `completed_unsupported`, `skipped`, `failed`), and inserts `processed_issues` **only** for `completed_full`. Uses `JIRA_*`, `OPENAI_API_KEY`, optional `OPENAI_MODEL_NAME`, `FLOW_TIMEOUT_SECONDS`, and `DATABASE_URL` from env.
 - **`service-desk-crew/`:** CrewAI project (`pip install -e ./service-desk-crew` from repo root). CLI: `cd service-desk-crew && crewai run` (uses `SERVICE_DESK_ISSUE_KEY` or demo key — requires Jira + OpenAI env).
 
 Configuration is **env-only** (§3.8): same variable names locally (`.env`) and on cluster (Kubernetes Secrets). No code fork.
@@ -70,7 +70,7 @@ Insert a pending job and confirm the worker picks it up:
 
 ```sh
 psql "$DATABASE_URL" -c "INSERT INTO jobs (issue_key, status, payload) VALUES ('TEST-1', 'pending', '{}');"
-# Watch worker logs: "job claimed", then "job completed" with status=done.
+# Watch worker logs: "job claimed", then "job completed" with a terminal status (e.g. awaiting_customer if intake fails; completed_full on full K8s path).
 ```
 
 ### 2. Webhook (valid secret)
@@ -98,9 +98,10 @@ Expect `401` and no new job in the database.
 ### 4. Phase 2–3: Jira, LLM, idempotency
 
 - Set `JIRA_BASE_URL`, `JIRA_API_TOKEN`, `JIRA_EMAIL`, and **`OPENAI_API_KEY`** in `.env`. Ensure the Jira user can read the issue and add internal comments.
-- Create a job for a real issue key. Run the worker; it should run the L1 flow and post an **internal comment** (missing-info request, unsupported notice, or full synthesis on the K8s path — depending on ticket text and intake).
-- Create a **second** job for the **same** `issue_key`. The worker should log **idempotency skip** (WARN) and not post again; job status `skipped`.
-- Invalid Jira credentials or missing `OPENAI_API_KEY` should yield ERROR and job `failed` without updating `processed_issues`.
+- Create a job for a real issue key. Run the worker; it should run the L1 flow and post an **internal comment** (missing-info request, unsupported notice, or full synthesis on the K8s path — depending on ticket text and intake). The job row ends as **`awaiting_customer`**, **`completed_unsupported`**, or **`completed_full`** (or **`failed`** on errors).
+- **`processed_issues`:** A row is inserted **only** when the job finishes **`completed_full`**. Missing-info and unsupported paths do **not** insert; a later webhook for the same `issue_key` can enqueue another run.
+- Create a **second** job for the **same** `issue_key` **after** a **`completed_full`** run: the worker should log **idempotency skip** (WARN); job status **`skipped`**. If the first run ended **`awaiting_customer`** or **`completed_unsupported`**, a second job should **run** the flow again (no row in `processed_issues` yet).
+- Invalid Jira credentials or missing `OPENAI_API_KEY` should yield ERROR and job **`failed`** without updating `processed_issues`.
 
 ## Endpoints
 
@@ -162,6 +163,14 @@ Note the **HTTPS Forwarding** URL (e.g. `https://abc123.ngrok-free.app`).
      ```
      (Use your project’s smart value for the issue key if different, e.g. `{{request.key}}` for JSM.)
 4. Save and enable the rule.
+
+5. **Second rule (re-run after the customer updates the request):** Add another automation (or branch) with trigger **When request is updated** (or **Issue updated**), same **Send web request** URL, headers, and JSON body as above. There is **only one `jobs` row per `issue_key`**: the API **updates** that row (`awaiting_customer` / `completed_unsupported` / **`failed`** → **`pending`**, or payload refresh only when **`pending`** / **`processing`**). After **`completed_full`**, a further webhook sets **`pending`** again on the same row; the worker may **`skip`** if `processed_issues` already has the issue.
+
+6. **Reduce noise (recommended):** Narrow the **update** rule with conditions so Jira does not call the webhook on every edit. Examples: **only when** description or a specific custom field changes, **or** when a label such as `ready-for-bot` is added, **or** use JQL/advanced conditions your Jira plan supports. That avoids spamming webhooks; the API still **dedupes** payload when status is **`pending`** or **`processing`**.
+
+7. **Webhook response fields:** `reopened` — previous status was **`awaiting_customer`**, **`completed_unsupported`**, or **`failed`** and was set back to **`pending`**. `deduped` — status was **`pending`** or **`processing`**; only the payload was refreshed. If both are false, the row was either newly inserted or re-queued from another terminal state (e.g. **`completed_full`**) on the **same** `issue_key` row.
+
+8. **Database:** Migration **`00003_jobs_issue_key_unique.sql`** removes duplicate `issue_key` rows (keeps newest `id`) and adds a **unique index** on **`issue_key`**.
 
 ### 5. Test
 

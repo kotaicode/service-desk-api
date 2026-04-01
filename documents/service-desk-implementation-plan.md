@@ -17,6 +17,28 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | **5** | Optional: Loki/Mimir | **`LOKI_URL`** / **`MIMIR_URL`** (empty = off); **`loki.py`** / **`mimir.py`** direct HTTP (**§7.3–§7.4** Option A); extend Diagnostics artifact with capped LogQL/PromQL; guardrails **§11** (line/range limits, redaction). |
 | **6** | Deploy to server / cluster | **Docker** images (Go API + Worker w/ **`service-desk-crew`**); **PostgreSQL** (in-cluster or managed); **Secrets** = same keys as **`.env`** (**`envFrom`**); **Ingress** for webhook; **kagent** Service URL; **Helm/Kustomize**; **RBAC** / **NetworkPolicy**; **`kubectl logs`** logging doc — **no app code changes** for config (**§2.2**, **§3.7–§3.8**, **§10**). |
 
+### 1.1 Job queue statuses, `processed_issues`, and webhook upsert (reference implementation)
+
+Aligns with tech spec **§4.3–4.4**. The **`jobs`** table has **at most one row per `issue_key`** (`UNIQUE(issue_key)`). The worker polls **`status = pending`** only.
+
+**`jobs.status` values**
+
+| Status | Meaning |
+|--------|---------|
+| **`pending`** | Ready to claim (inserted or reopened by Go API webhook). |
+| **`processing`** | Worker claimed the row; CrewAI flow running. |
+| **`completed_full`** | Full K8s path finished: intake → diagnostics → synthesis → final internal comment. **`set_processed`** inserts **`processed_issues`** for this `issue_key`. |
+| **`awaiting_customer`** | Missing-info path: internal comment only; **no** `processed_issues` row. |
+| **`completed_unsupported`** | Out-of-scope / non-K8s path: internal comment only; **no** `processed_issues` row. |
+| **`skipped`** | `issue_key` already in **`processed_issues`**; flow not run (full-resolution idempotency). |
+| **`failed`** | Error, timeout, or missing env; **no** `processed_issues` row unless a successful full path ran earlier. |
+
+**`processed_issues`:** Insert **only** when the worker reaches **`completed_full`**. Do **not** insert after partial outcomes — the customer can update the ticket and a follow-up webhook can set the job back to **`pending`** for a later full run.
+
+**Go API (`UpsertJobFromWebhook`):** (1) **Insert** if no row for `issue_key`. (2) **Reopen** to **`pending`** if current status is **`awaiting_customer`**, **`completed_unsupported`**, or **`failed`** (response may include **`reopened`: true**). (3) **Dedupe** if **`pending`** or **`processing`**: refresh **`payload`** only (**`deduped`: true**). (4) **Re-queue** other terminals (e.g. **`completed_full`**, **`skipped`**) to **`pending`** on the same row; the worker may still **`skip`** if **`processed_issues`** already has the issue.
+
+**Edge cases:** Narrow Jira Automation triggers where possible; rely on **`issue_key`** uniqueness + upsert to avoid duplicate rows; redundant webhooks are safe (payload refresh or no-op).
+
 ---
 
 ## 2. Phase 1 — Foundation (local first) ✅ Completed
@@ -36,7 +58,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | Step | Action |
 |------|--------|
 | 2.1 | Choose DB driver: Go (`database/sql` + `github.com/jackc/pgx/v5/stdlib` or pgx pool); Python (`psycopg2` or SQLAlchemy). |
-| 2.2 | Create **jobs** table: `id`, `issue_key`, `status`, `payload` (JSON/text), `created_at`. Optionally `updated_at`. |
+| 2.2 | Create **jobs** table: `id`, `issue_key`, `status`, `payload` (JSON/text), `created_at`, `updated_at`. Enforce **`UNIQUE(issue_key)`** so there is one queue row per ticket (tech spec **§4.4**). |
 | 2.3 | Read `DATABASE_URL` from env only (no hardcoded DSN). Use PostgreSQL connection string (e.g. `postgres://localhost:5432/service_desk?sslmode=disable`). |
 
 ### 2.3 Go API (service-desk-api — webhook receiver)
@@ -46,7 +68,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | 3.1 | Implement HTTP server (e.g. `net/http` or Chi/Gin) with one POST endpoint for the Jira webhook (e.g. `/webhook/jira` or `/api/webhook`). |
 | 3.2 | **Validate webhook secret** on every request: read `X-Webhook-Secret` (or agreed header/query) and compare to `WEBHOOK_SECRET`; if missing or wrong, return 401 and do not store. Log “secret valid” or “secret invalid”. |
 | 3.3 | **Parse body** to get `issue_key` (or equivalent from Jira Automation payload). Log “webhook received” with `issue_key` and request id if present. |
-| 3.4 | **Insert one row** into jobs: `issue_key`, `status = 'pending'`, `payload` = raw body or minimal JSON, `created_at`. Single DB connection from env. |
+| 3.4 | **Upsert one row per `issue_key`** (e.g. **`UpsertJobFromWebhook`**): first webhook **inserts** `pending`; later webhooks **reopen**, **dedupe**, or **re-queue** per **§1.1** — never two rows for the same `issue_key`. |
 | 3.5 | **Return 200** after insert. On DB or parse errors return 5xx and log with ERROR. |
 | 3.6 | **Logging (§3.5):** Every request log: webhook received (`issue_key`, request id); secret valid/invalid; job stored (`job_id`, `issue_key`). On failure: ERROR with reason. Never log secrets. Honour `LOG_LEVEL`. |
 
@@ -58,8 +80,8 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | 4.2 | Read config from env only: `DATABASE_URL`, `LOG_LEVEL`. |
 | 4.3 | **Poll loop:** Periodically query DB for rows with `status = 'pending'` (e.g. every 10–30 s). Optionally limit to one job per worker. |
 | 4.4 | **Claim job:** When a row is found, update `status` to `'processing'` (use transaction/lock so only one worker claims it). Log “job claimed” with `job_id`, `issue_key`. |
-| 4.5 | **Skeleton processing:** For Phase 1, no Jira or CrewAI; e.g. no-op or short sleep, then set job `status` to `'done'` (or `'failed'` on error). Validates pipeline only. |
-| 4.6 | **Logging (§3.5):** Log job claimed (`job_id`, `issue_key`); on exception log ERROR; optionally log when job marked done/failed. Honour `LOG_LEVEL`. |
+| 4.5 | **Skeleton processing:** For Phase 1, no Jira or CrewAI; e.g. no-op or short sleep, then set job `status` to a terminal value such as **`completed_full`** or **`failed`** (see **§1.1**). Validates pipeline only. |
+| 4.6 | **Logging (§3.5):** Log job claimed (`job_id`, `issue_key`); on exception log ERROR; optionally log when job reaches a terminal status (**§1.1**). Honour `LOG_LEVEL`. |
 
 ### 2.5 Run locally and smoke test
 
@@ -85,7 +107,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 
 - [x] `.env.example` with `WEBHOOK_SECRET`, `DATABASE_URL`, `LOG_LEVEL`; `.env` gitignored.
 - [x] Jobs table and DB access via `DATABASE_URL` only.
-- [x] Go API: webhook endpoint, secret validation, parse `issue_key`, insert job, return 200; logging per §3.5.
+- [x] Go API: webhook endpoint, secret validation, parse `issue_key`, **upsert** job per **`issue_key`** (**§1.1**), return 200; logging per §3.5.
 - [x] Worker: poll DB, claim job, skeleton process, update status; logging per §3.5.
 - [x] Smoke tests: manual job insert and webhook POST (valid and invalid secret) pass.
 - [x] README: how to run API and worker locally and how to run smoke tests.
@@ -94,7 +116,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 
 ## 3. Phase 2 — Jira and idempotency ✅ Completed
 
-**Goal:** Add Jira API integration to the worker (read issue, post comment) using env-only credentials; implement idempotency so each ticket is processed at most once; run a minimal comment flow (fetch ticket, post one internal comment). No CrewAI yet — this validates Jira connectivity and idempotency before Phase 3. Logging per tech spec §3.5: idempotency skip, comment posted.
+**Goal:** Add Jira API integration to the worker (read issue, post comment) using env-only credentials; implement idempotency for **full-resolution** runs (**`processed_issues`** per **§1.1**). In the **`service-desk-api`** repo, Phase 2 foundations are merged with Phase 3: the worker runs **`run_l1_support`** (CrewAI) rather than a standalone “minimal comment only” loop. Logging per tech spec §3.5: idempotency skip, flow outcomes, comment posted.
 
 **Status:** ✅ **Phase 2 completed** in **`service-desk-api`** — see verification notes in §3.7 below.
 
@@ -112,9 +134,9 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 
 | Step | Action |
 |------|--------|
-| 2.2.1 | Add **idempotency storage** per tech spec §4.3. Option A: new table `processed_issues` with columns e.g. `issue_key` (unique), `processed_at`, optionally `job_id`. Option B: add `processed_at` (nullable timestamp) to `jobs` and a unique constraint or separate table keyed by `issue_key` so “already processed” is a lookup by `issue_key`. |
-| 2.2.2 | **Before** the worker runs processing for a job, **check** if `issue_key` is already in `processed_issues` (or already has a completed run). If yes: log “idempotency skip” (WARN), update current job status to `done` or `skipped`, and do not call Jira or post a comment. |
-| 2.2.3 | **After** successfully posting the minimal comment, **insert** a row into `processed_issues` (or set the processed marker) for this `issue_key` so future jobs for the same ticket are skipped. |
+| 2.2.1 | Add **idempotency storage** per tech spec **§4.3**: table **`processed_issues`** with **`issue_key`** (unique / PK), **`processed_at`**, optionally **`job_id`**. This marks **full L1 resolution** only, not every comment. |
+| 2.2.2 | **Before** the worker runs the flow, **check** if `issue_key` is already in **`processed_issues`**. If yes: log “idempotency skip” (WARN), set job status to **`skipped`**, and do not run the flow or call Jira. |
+| 2.2.3 | **After** the worker finishes with job status **`completed_full`** (full K8s + synthesis path), **insert** into **`processed_issues`**. Partial outcomes (**`awaiting_customer`**, **`completed_unsupported`**, **`failed`**) **do not** insert (**§1.1**). |
 
 ### 3.3 Jira tools in the worker
 
@@ -130,9 +152,9 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | Step | Action |
 |------|--------|
 | 2.4.1 | After claiming a job (as in Phase 1), **check idempotency**: if `issue_key` already processed, log “idempotency skip”, update job status, exit. |
-| 2.4.2 | **Fetch ticket** from Jira using `jira_get_issue(issue_key)`. Worker fetches at processing time (do not cache full ticket in DB per §4.0). If fetch fails, log ERROR, mark job failed, exit. |
-| 2.4.3 | **Minimal comment flow:** Post one internal comment to the ticket (e.g. “Ticket received for triage.” or “Processing started — analysis will follow.”). This validates that read + write to Jira work before Phase 3. |
-| 2.4.4 | **Mark processed:** Insert into `processed_issues` (or set processed marker) for this `issue_key`. Update job status to `done`. |
+| 2.4.2 | **Fetch ticket** from Jira inside the Flow / `run_l1_support` using Jira tools. Worker fetches at processing time (do not cache full ticket in DB per §4.0). If fetch fails, log ERROR, mark job **`failed`**, exit. |
+| 2.4.3 | **L1 flow:** Intake → route → diagnostics → synthesis → post comment per **§8.2**; outcomes drive **`jobs.status`** (**§1.1**). |
+| 2.4.4 | **Mark processed:** Call **`set_processed(issue_key, job_id)`** only when the run is **full resolution** (Phase 3+: CrewAI outcome **`FLOW_OUTCOME_FULL_RESOLUTION`** → job **`completed_full`**). Do **not** call **`set_processed`** for missing-info, unsupported, or error paths. Update **`jobs.status`** to the terminal value matching the outcome (**§1.1**). |
 | 2.4.5 | **Loop prevention (§9.3):** Rely on idempotency so that when the bot’s comment triggers a webhook (if Jira Automation were on “comment created”), the worker would skip because `issue_key` is already processed. Prefer Jira Automation on “Request created” only. |
 
 ### 3.5 Logging
@@ -155,12 +177,12 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 
 **Status: ✅ Phase 2 completed** (`service-desk-api` repo)
 
-**Verification (code review):** `.env.example` and `worker/config.py` expose `JIRA_BASE_URL`, `JIRA_API_TOKEN`, `JIRA_EMAIL`. Migration `db/migrations/00002_processed_issues.sql` defines `processed_issues` (`issue_key` PK, `processed_at`, `job_id`). `worker/tools/jira.py` implements REST `GET /rest/api/3/issue/{key}` and `POST .../comment` with ADF body and `jsdPublic: false` when `internal=True`. `worker/run.py` implements `is_processed` / `set_processed`, `process_job`: claim → idempotency skip (`skipped`) → `jira_get_issue` → minimal internal comment → `set_processed` → `done`; missing Jira env or API errors → `failed` without marking processed. Logging: WARN idempotency skip, INFO comment posted, ERROR on failures with `job_id`/`issue_key`. README documents Phase 2 and manual test steps. *Automated tests and live Jira smoke tests are the operator’s responsibility before production use.*
+**Verification (code review):** `.env.example` and `worker/config.py` expose `JIRA_BASE_URL`, `JIRA_API_TOKEN`, `JIRA_EMAIL`. Migrations `db/migrations/00002_processed_issues.sql` and **`00003_jobs_issue_key_unique.sql`** define `processed_issues` and **`UNIQUE(issue_key)`** on **`jobs`** (one row per ticket). Jira tools live under **`service_desk_crew.tools.jira`** (Phase 3); `worker/run.py` implements `is_processed` / `set_processed`, `process_job`: claim → idempotency skip (`skipped`) → **`run_l1_support`** (CrewAI) → map flow outcome → **`completed_full`** only then **`set_processed`**; other outcomes **`awaiting_customer`** / **`completed_unsupported`** / **`failed`** without **`processed_issues`** insert. Missing Jira/LLM env or API errors → **`failed`**. Logging: WARN idempotency skip, INFO flow end per outcome, ERROR on failures with `job_id`/`issue_key`. README documents Phase 2–3 and manual test steps. *Automated tests and live Jira smoke tests are the operator’s responsibility before production use.*
 
 - [x] `.env.example` includes `JIRA_BASE_URL`, `JIRA_API_TOKEN`, `JIRA_EMAIL`; worker reads Jira config from env only.
 - [x] Idempotency: table or marker per `issue_key`; worker checks before processing and stores marker after successful comment.
 - [x] Worker implements `jira_get_issue(issue_key)` and `jira_post_comment(issue_key, body, internal=True)` using env credentials.
-- [x] Worker flow: claim job → check idempotency (skip if already processed) → fetch ticket → post minimal comment → mark processed → update job done.
+- [x] Worker flow: claim job → check idempotency (skip → **`skipped`**) → run L1 flow → **`set_processed`** only on **`completed_full`** → terminal status per **§1.1**.
 - [x] Logging: idempotency skip (WARN), comment posted (INFO), Jira errors (ERROR); correlation via `job_id`/`issue_key`.
 - [x] Tests: (1) first run posts comment and marks processed; (2) second job for same issue_key skips with idempotency log; (3) invalid Jira creds or issue_key yields ERROR and job failed. *(Manual verification per README § smoke test 4.)*
 
@@ -168,7 +190,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 
 ## 4. Phase 3 — CrewAI Flow (`service-desk-crew` folder, import `service_desk_crew`) ✅ Completed
 
-**Goal:** Place the **entire standard output of `crewai create crew service_desk_crew`** in monorepo folder **`service-desk-crew/`** (name with hyphens), **outside** `worker/`, per tech spec **§2.1.1** and **§10**. The Python package lives at **`service-desk-crew/src/service_desk_crew/`** (import **`service_desk_crew`**). Add **`flow.py`** and **`config/llm_factory.py`** for the L1 pipeline: **load_ticket** → **intake_check** → **route** → **k8s_diagnostics** (stub) → **synthesize** → **post_comment** → **mark_processed** (**§8.2**, agents **§6**). **Replace** Phase 2 “minimal comment only” with this Flow from the worker. **Idempotency** §4.3; **mark_processed** only after successful comment. Logging **§3.5**.
+**Goal:** Place the **entire standard output of `crewai create crew service_desk_crew`** in monorepo folder **`service-desk-crew/`** (name with hyphens), **outside** `worker/`, per tech spec **§2.1.1** and **§10**. The Python package lives at **`service-desk-crew/src/service_desk_crew/`** (import **`service_desk_crew`**). Add **`flow.py`** and **`config/llm_factory.py`** for the L1 pipeline: **load_ticket** → **intake_check** → **route** → **k8s_diagnostics** (stub) → **synthesize** → **post_comment** → **mark_processed** (**§8.2**, agents **§6**). **Replace** Phase 2 “minimal comment only” with this Flow from the worker. **Idempotency** §4.3; **`set_processed`** / **`processed_issues`** only after **`completed_full`** (full K8s + synthesis path). Logging **§3.5**.
 
 **Scaffold (illustrative):** `mkdir -p service-desk-crew && cd service-desk-crew && crewai create crew service_desk_crew` — align file paths with your installed CrewAI CLI version and [CrewAI project layout](https://docs.crewai.com/) documentation.
 
@@ -227,7 +249,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | Step | Action |
 |------|--------|
 | 3.7.1 | **`worker/run.py`**: after claim + idempotency, **`import service_desk_crew`** — invoke Flow **`kickoff(...)`** (e.g. `L1SupportFlow`) or **`run_l1_support(...)`** from **`service_desk_crew.main`**. No **`@CrewBase`** in **`worker/`**. |
-| 3.7.2 | Success → job **`done`**; exception → **`failed`**; no **`processed_issues`** if comment did not succeed. |
+| 3.7.2 | Map CrewAI **outcome** to job status: **`completed_full`** (+ **`set_processed`**) only for full K8s resolution path; **`awaiting_customer`** / **`completed_unsupported`** / **`skipped`** / **`failed`** per **§1.1**; exceptions → **`failed`** without **`set_processed`**. |
 | 3.7.3 | **Timeouts** **§11**. |
 
 ### 4.8 CLI entry (`crewai run`)
@@ -249,7 +271,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 |------|--------|
 | 3.10.1 | **`pip install -e ./service-desk-crew`** from monorepo root; run worker with `.env` (LLM + **`JIRA_*`**). |
 | 3.10.2 | **Missing-info** / **k8s-ish** / **non-K8s** paths per **§12**. |
-| 3.10.3 | **Idempotency:** second job same `issue_key` → skip. |
+| 3.10.3 | **Idempotency:** if **`processed_issues`** already has `issue_key` → job **`skipped`**; webhook may still set **`pending`** again per **§1.1** (worker skips again). |
 | 3.10.4 | Optional: **`cd service-desk-crew && crewai run`** (crew without DB). |
 
 ### 4.11 Phase 3 deliverables checklist
