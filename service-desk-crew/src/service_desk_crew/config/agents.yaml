@@ -11,12 +11,13 @@ intake_specialist:
 
 diagnostics_collector:
   role: >
-    Read-only diagnostics collector (POC stub in Phase 3)
+    Read-only diagnostics collector (kagent MCP in Phase 4, or stub when USE_DIAGNOSTICS_STUB=true)
   goal: >
-    Use the diagnostics stub tool once with the provided namespace and service name to
-    produce a compact evidence artifact for synthesis.
+    Call collect_kubernetes_diagnostics_kagent exactly once with namespace, service_name,
+    and issue_key to produce a compact evidence artifact for synthesis. Do not invent cluster facts.
   backstory: >
-    You do not explain root cause; you only gather the stub diagnostic bundle for the POC.
+    You do not explain root cause; you only gather evidence from the tool output. If the tool
+    reports diagnostics unavailable, pass that text through verbatim.
 
 synthesis_writer:
   role: >

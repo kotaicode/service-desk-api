@@ -201,7 +201,11 @@ Note the **HTTPS Forwarding** URL (e.g. `https://abc123.ngrok-free.app`).
 └── README.md
 ```
 
+## Documentation
+
+- **[service-desk-docs](https://github.com/kotaicode/service-desk-docs)** (mdBook) — architecture, Kagent MCP, Jira, queue, and L1 flow.
+
 ## Reference
 
 - Service Desk POC Technical Specification (see `agentic-dev/service-desk-poc-tech-spec.md` when in a monorepo)
-- Service Desk Implementation Plan (see `agentic-dev/service-desk-implementation-plan.md`)
+- Service Desk Implementation Plan: `documents/service-desk-implementation-plan.md`

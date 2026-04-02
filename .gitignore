@@ -30,3 +30,6 @@ venv/
 # Temp
 tmp/
 *.log
+
+# Documents
+documents/

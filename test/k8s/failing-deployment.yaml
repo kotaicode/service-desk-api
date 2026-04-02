@@ -1,0 +1,38 @@
+# Intentionally unhealthy workload for manual E2E tests (test.md §4.3 / §5.1).
+# Apply to the same cluster kagent can read (e.g. kind + port-forward to kagent-controller).
+#
+#   kubectl apply -f test/k8s/failing-deployment.yaml
+#
+# Expected: Pod(s) in CrashLoopBackOff; events show BackOff / Error.
+# Use in Jira ticket: namespace sd-poc-test, workload name payments-api (matches Deployment).
+#
+# Watch: kubectl get pods -n sd-poc-test -w
+# Remove: kubectl delete namespace sd-poc-test
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sd-poc-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: sd-poc-test
+  labels:
+    app.kubernetes.io/name: payments-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          # Exit immediately on each start → CrashLoopBackOff for diagnostics demos
+          command: ["/bin/sh", "-c", "echo failing on purpose && exit 1"]

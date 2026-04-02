@@ -23,3 +23,12 @@ def load_routing_keywords() -> list[str]:
 def is_k8s_ish(text: str, keywords: list[str]) -> bool:
     low = text.lower()
     return any(k.lower() in low for k in keywords)
+
+
+def load_mcp_endpoints() -> dict:
+    """Load config/mcp_endpoints.yml (Phase 4 kagent MCP allowlist)."""
+    path = monorepo_root() / "config" / "mcp_endpoints.yml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    return data

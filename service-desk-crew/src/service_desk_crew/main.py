@@ -20,8 +20,16 @@ def run_l1_support(issue_key: str, job_id: int | None = None) -> str:
     """
     from service_desk_crew.flow import L1SupportFlow
 
+    prev_issue = os.environ.get("SERVICE_DESK_ISSUE_KEY")
+    os.environ["SERVICE_DESK_ISSUE_KEY"] = issue_key
     flow = L1SupportFlow()
-    flow.kickoff(inputs={"issue_key": issue_key, "job_id": job_id})
+    try:
+        flow.kickoff(inputs={"issue_key": issue_key, "job_id": job_id})
+    finally:
+        if prev_issue is not None:
+            os.environ["SERVICE_DESK_ISSUE_KEY"] = prev_issue
+        else:
+            os.environ.pop("SERVICE_DESK_ISSUE_KEY", None)
     outcome = flow.state.outcome
     if not outcome:
         log.error("flow finished without outcome issue_key=%s job_id=%s", issue_key, job_id)

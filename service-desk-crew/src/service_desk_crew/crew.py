@@ -4,7 +4,7 @@ from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
 
 from service_desk_crew.config.llm_factory import get_llm
-from service_desk_crew.tools.diagnostics_stub import DiagnosticsStubTool
+from service_desk_crew.tools.mcp_k8s import diagnostics_tools_for_crew
 
 
 @CrewBase
@@ -27,7 +27,7 @@ class ServiceDeskCrew:
     def diagnostics_collector(self) -> Agent:
         return Agent(
             config=self.agents_config["diagnostics_collector"],  # type: ignore[index]
-            tools=[DiagnosticsStubTool()],
+            tools=diagnostics_tools_for_crew(),
             llm=get_llm(),
             verbose=True,
         )

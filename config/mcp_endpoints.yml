@@ -1,3 +1,16 @@
-# Phase 4: kagent MCP — optional placeholder (tech spec §10)
-kagent_mcp_base_url: ""
-allowed_tools: []
+# MCP allowlist for Phase 4 — kagent HTTP endpoint (tech spec §7.2, §10).
+# Base URL: set KAGENT_MCP_URL in the environment (e.g. http://127.0.0.1:8083/mcp).
+# Do not put secrets in this file.
+
+allowed_tools:
+  - list_agents
+  - invoke_agent
+
+# Default agent for read-only Kubernetes evidence (kagent demo / typical install).
+# Override with KAGENT_DIAGNOSTICS_AGENT_REF if needed.
+diagnostics_agent_ref: kagent/k8s-agent
+
+# If non-empty, invoke_agent is only allowed for these agent refs (defense in depth).
+allowed_invoke_agent_refs:
+  - kagent/k8s-agent
+  - kagent/observability-agent

@@ -30,10 +30,11 @@ diagnostics_task:
     Namespace: {namespace}
     Service / workload: {service_name}
 
-    Call the tool run_kubernetes_diagnostics_stub exactly once with these values.
+    Call the tool collect_kubernetes_diagnostics_kagent exactly once with
+    namespace, service_name, and issue_key set as above.
     Return the tool output verbatim as your final answer (add no extra commentary).
   expected_output: >
-    Verbatim stub diagnostic bundle text from the tool.
+    Verbatim diagnostics bundle text from the tool (or stub when stub mode is enabled).
   agent: diagnostics_collector
 
 synthesis_task:

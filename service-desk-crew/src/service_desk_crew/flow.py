@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from service_desk_crew.crew import ServiceDeskCrew
 from service_desk_crew.repo_config import is_k8s_ish, load_required_fields_yaml, load_routing_keywords
 from service_desk_crew.tools.jira import format_ticket_for_agents, jira_get_issue, jira_post_comment
+from service_desk_crew.tools.mcp_k8s import DIAGNOSTICS_UNAVAILABLE_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -158,9 +159,29 @@ class L1SupportFlow(Flow[L1State]):
             }
         )
         self.state.diagnostics_artifact = str(result)
-        return self.state.diagnostics_artifact
+        if self.state.diagnostics_artifact.strip().startswith(DIAGNOSTICS_UNAVAILABLE_PREFIX):
+            body = (
+                "Kubernetes diagnostics could not be gathered automatically "
+                "(kagent MCP unavailable or misconfigured). "
+                "Verify `KAGENT_MCP_URL`, port-forward to `kagent-controller`, and agent allowlist in `config/mcp_endpoints.yml`."
+            )
+            jira_post_comment(self.state.issue_key, body, internal=True)
+            self.state.outcome = FLOW_OUTCOME_AWAITING_CUSTOMER
+            return "diag_unavailable"
+        return "continue"
 
-    @listen(run_diagnostics)
+    @router(run_diagnostics)
+    def route_after_diagnostics(self, _prev: str) -> str:
+        if self.state.outcome == FLOW_OUTCOME_AWAITING_CUSTOMER:
+            return "path_diag_unavailable"
+        return "path_synthesis"
+
+    @listen("path_diag_unavailable")
+    def skip_synthesis_after_failed_diagnostics(self) -> str:
+        log.info("flow skip synthesis (diagnostics unavailable) issue_key=%s", self.state.issue_key)
+        return "skipped_synthesis"
+
+    @listen("path_synthesis")
     def run_synthesis(self) -> str:
         log.info("flow step synthesis issue_key=%s", self.state.issue_key)
         base = ServiceDeskCrew()
