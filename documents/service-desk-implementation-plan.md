@@ -1,8 +1,12 @@
 # Service Desk POC — Implementation Plan
 
-**Phases and steps to implement the Service Desk L1 support automation.**
+**Phased checklist for implementing the Service Desk L1 support automation** in this monorepo.
 
-This plan is derived from the [Service Desk POC Technical Specification](service-desk-poc-tech-spec.md). Complete all phases **locally first** (using `.env`, PostgreSQL, and optional tunnel for webhook); then deploy to server/cluster using the same env var names from Secrets.
+**Phase 4 — kagent MCP:** connect the diagnostics step to **[kagent](https://github.com/kagent-dev/kagent)** over the **Model Context Protocol** using **`KAGENT_MCP_URL`**, **`config/mcp_endpoints.yml`**, and **`mcp_k8s.py`** (read-only tool allowlist). Full steps are in **§5** below.
+
+Derived from the [Service Desk POC Technical Specification](service-desk-poc-tech-spec.md).
+
+Complete all phases **locally first** (`.env`, PostgreSQL, and optional tunnel for the webhook); then deploy to a server or cluster using the **same** environment variable names from Kubernetes Secrets.
 
 ---
 
@@ -13,7 +17,7 @@ This plan is derived from the [Service Desk POC Technical Specification](service
 | **1** | Foundation (local first) ✅ | Wiring, trigger, logging, single env contract. Go API + Worker skeleton; webhook → DB → worker poll. |
 | **2** | Jira and idempotency ✅ | Jira tools (env-only credentials); idempotency; minimal comment flow. |
 | **3** | CrewAI Flow ✅ | **`service-desk-crew/`** — full **`crewai create crew service_desk_crew`** output under **`src/service_desk_crew/`** (outside `worker/`); **`service-desk-crew/pyproject.toml`**; L1 **`flow.py`** + **`llm_factory.py`**; worker: **`pip install -e ./service-desk-crew`** then **`import service_desk_crew`**; Diagnostics stub. |
-| **4** | kagent integration | **`KAGENT_MCP_URL`** → kagent MCP (kind/minikube, tunnel, or in-cluster Service); **`config/mcp_endpoints.yml`** + **`mcp_k8s.py`** allowlist; Diagnostics uses real read-only K8s tools; same code path local vs cluster (**§3.1**, **§7.2**). |
+| **4** | **kagent MCP** (Kubernetes diagnostics) | **`KAGENT_MCP_URL`** → kagent’s MCP HTTP endpoint (kind/minikube, **kubectl port-forward**, tunnel, or in-cluster Service); **`config/mcp_endpoints.yml`** + **`mcp_k8s.py`** allowlist; Diagnostics uses real read-only K8s tools; same code path local vs cluster (**§3.1**, **§7.2**). |
 | **5** | Optional: Loki/Mimir | **`LOKI_URL`** / **`MIMIR_URL`** (empty = off); **`loki.py`** / **`mimir.py`** direct HTTP (**§7.3–§7.4** Option A); extend Diagnostics artifact with capped LogQL/PromQL; guardrails **§11** (line/range limits, redaction). |
 | **6** | Deploy to server / cluster | **Docker** images (Go API + Worker w/ **`service-desk-crew`**); **PostgreSQL** (in-cluster or managed); **Secrets** = same keys as **`.env`** (**`envFrom`**); **Ingress** for webhook; **kagent** Service URL; **Helm/Kustomize**; **RBAC** / **NetworkPolicy**; **`kubectl logs`** logging doc — **no app code changes** for config (**§2.2**, **§3.7–§3.8**, **§10**). |
 

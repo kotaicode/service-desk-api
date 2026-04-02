@@ -1,9 +1,11 @@
 # TECHNICAL SPECIFICATION  
 # Service Desk POC — L1 Support Automation  
 **CrewAI + kagent + Jira Service Management**  
-v1.1 — March 2026 — DRAFT  
+v1.1 — March 2026  
 
-Internal proof of concept. Goal: validate end-to-end flow (ticket → analysis → comment) before broadening to more ticket types and production hardening.
+This specification describes a **reference proof of concept (POC)** for an agentic L1 support desk. **Goal:** validate the end-to-end flow (ticket → analysis → comment) before broadening to more ticket types and production hardening. It is maintained with the **service-desk-api** repository for contributors and anyone reusing or extending the design.
+
+A central integration point for **Kubernetes diagnostics** is **kagent** exposed as an **MCP (Model Context Protocol)** server: agents call read-only cluster tools through **`KAGENT_MCP_URL`** (see §§3.2, 6.2, 7.2) without embedding `kubectl` in the worker. This keeps the POC safe (no cluster writes) and interoperable with standard MCP clients.
 
 ---
 
@@ -13,7 +15,7 @@ This document defines the **minimum proof of concept (POC)** for an agentic L1 s
 
 **Automatic trigger:** Whenever the **user** creates a Jira Service Management ticket, the agent pipeline is **automatically triggered** to process that ticket. No manual kick-off or user action is required beyond creating the ticket; Jira Automation sends a webhook to the system; the Go API stores the job in the database and workers run the agents.
 
-The POC uses **CrewAI** for multi-agent orchestration (Flows), **kagent** for Kubernetes read-only tools via MCP, and **Jira Service Management** for triggers and posting results. The structure below is enough to start implementation.
+The POC uses **CrewAI** for multi-agent orchestration (Flows), **kagent** (MCP server) for **read-only Kubernetes diagnostics**, and **Jira Service Management** for triggers and posting results. The structure below is enough to start implementation.
 
 **Local first, then cluster:** Implement and test **on a developer machine first** (same architecture and concepts: webhook → API → DB → worker → CrewAI → Jira and optional kagent). Use a **single set of environment variable names** loaded from **one `.env` file** locally. When moving to the server or Kubernetes, **map the same variable names** into the process environment via **Kubernetes Secrets** (or a secret manager). **Application code reads only `os.Getenv` / `os.environ`** — no separate “local vs cluster” code paths; switching environments is **only** how env is supplied (`.env` + process start vs Secret → Pod env).
 
