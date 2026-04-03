@@ -1,6 +1,6 @@
 # Service Desk API
 
-Go API and Python worker for the Service Desk POC — L1 support automation (Jira webhook → queue → CrewAI flow -> Kagent MCP). This repo implements the **webhook receiver** and **worker** as per the Service Desk POC Technical Specification.
+Go API and Python worker for the Service Desk POC — L1 support automation (Jira webhook → queue → CrewAI flow → kagent MCP). This repo implements the **webhook receiver** and **worker** as per the Service Desk POC Technical Specification.
 
 **Kubernetes diagnostics — [kagent](https://github.com/kagent-dev/kagent) via MCP:** for **Phase 4**, the CrewAI flow talks to a **Model Context Protocol (MCP)** server exposed by kagent so agents can run **read-only** cluster tools (pods, events, `describe`, and similar). Set **`KAGENT_MCP_URL`** in `.env` (see `.env.example`) when the worker can reach that endpoint (in-cluster Service, `kubectl port-forward`, or a tunnel). If unset, diagnostics use a **stub** — enough for local Jira + LLM testing without a cluster.
 
@@ -15,7 +15,7 @@ Go API and Python worker for the Service Desk POC — L1 support automation (Jir
 - **Go API:** Receives Jira webhook at `POST /webhook/jira`, validates `X-Webhook-Secret`, parses `issue_key` from body. **`jobs` has at most one row per `issue_key`** (unique index). **`UpsertJobFromWebhook`:** first issue → insert **`pending`**; **`awaiting_customer`**, **`completed_unsupported`**, or **`failed`** → **`pending`** again (**`reopened`: true**); **`pending`** / **`processing`** → refresh payload only (**`deduped`: true**); other terminals (e.g. **`completed_full`**, **`skipped`**) → **`pending`** on the same row for another pass. Response JSON includes **`reopened`** and **`deduped`**. Uses only `WEBHOOK_SECRET`, `DATABASE_URL`, `LOG_LEVEL`.
 - **Database:** PostgreSQL (`DATABASE_URL`); `jobs` table (queue); `processed_issues` table (idempotency by `issue_key`).
 - **Worker (Python):** Polls for `pending` jobs, claims one, checks idempotency (**skip only if `issue_key` is already in `processed_issues`**, i.e. a prior **full-resolution** run), runs **`service_desk_crew`** L1 flow, updates `jobs.status` to a terminal value (`completed_full`, `awaiting_customer`, `completed_unsupported`, `skipped`, `failed`), and inserts `processed_issues` **only** for `completed_full`. Uses `JIRA_*`, `OPENAI_API_KEY`, optional `OPENAI_MODEL_NAME`, `FLOW_TIMEOUT_SECONDS`, and `DATABASE_URL` from env.
-- **kagent MCP (Phase 4):`KAGENT_MCP_URL`** (+ optional **`KAGENT_MCP_TOKEN`**) so the flow’s diagnostics step calls kagent’s MCP **read-only** Kubernetes tools. Configured alongside **`config/mcp_endpoints.yml`** and **`service-desk-crew/.../tools/mcp_k8s.py`**. Same env variable names locally and in Kubernetes Secrets.
+- **kagent MCP (Phase 4):** **`KAGENT_MCP_URL`** (+ optional **`KAGENT_MCP_TOKEN`**) so the flow’s diagnostics step calls kagent’s MCP **read-only** Kubernetes tools. Configured alongside **`config/mcp_endpoints.yml`** and **`service-desk-crew/.../tools/mcp_k8s.py`**. Same env variable names locally and in Kubernetes Secrets.
 - **`service-desk-crew/`:** CrewAI project (`pip install -e ./service-desk-crew` from repo root). CLI: `cd service-desk-crew && crewai run` (uses `SERVICE_DESK_ISSUE_KEY` or demo key — requires Jira + OpenAI env).
 
 Configuration is **env-only** (§3.8): same variable names locally (`.env`) and on cluster (Kubernetes Secrets). No code fork.
@@ -36,7 +36,7 @@ Configuration is **env-only** (§3.8): same variable names locally (`.env`) and 
    # Edit .env: set WEBHOOK_SECRET (required), DATABASE_URL, LOG_LEVEL.
    # For Phase 2+: set JIRA_BASE_URL, JIRA_API_TOKEN, JIRA_EMAIL (worker only).
    # For Phase 3+: set OPENAI_API_KEY (and optionally OPENAI_MODEL_NAME).
-   # For Phase 4 (kagent MCP): set KAGENT_MCP_URL (and optional KAGENT_MCP_TOKEN) when the worker reach MCP.
+   # For Phase 4 (kagent MCP): set KAGENT_MCP_URL (and optional KAGENT_MCP_TOKEN) when the worker can reach MCP.
    ```
 
 2. Install Go deps. Run the API once so migrations run (creates `jobs` and `processed_issues` tables):
@@ -205,12 +205,3 @@ Note the **HTTPS Forwarding** URL (e.g. `https://abc123.ngrok-free.app`).
 ├── .gitignore
 └── README.md
 ```
-
-## Documentation
-
-- **[service-desk-docs](https://github.com/kotaicode/service-desk-docs)** (mdBook) — architecture, Kagent MCP, Jira, queue, and L1 flow.
-
-## Reference
-
-- [Service Desk POC Technical Specification](documents/service-desk-poc-tech-spec.md)
-- [Service Desk Implementation Plan](documents/service-desk-implementation-plan.md)
