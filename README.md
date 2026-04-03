@@ -64,7 +64,7 @@ Configuration is **env-only** (§3.8): same variable names locally (`.env`) and 
    ```sh
    python -m worker
    ```
-   Worker reads `DATABASE_URL`, `LOG_LEVEL`, `JIRA_*`, `OPENAI_API_KEY`, optional `FLOW_TIMEOUT_SECONDS`, and optional **`KAGENT_MCP_URL`** (Phase 4 / kagent MCP) from env; polls every 15s by default.
+   Worker reads `DATABASE_URL`, `LOG_LEVEL`, `JIRA_*`, `OPENAI_API_KEY`, optional `FLOW_TIMEOUT_SECONDS`, and `KAGENT_MCP_URL` (Phase 4 / kagent MCP) from env; polls every 15s by default.
 
 ## Smoke tests
 

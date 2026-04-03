@@ -1,4 +1,4 @@
-# service_desk_crew (Service Desk POC — Phase 3)
+# service_desk_crew (Service Desk POC)
 
 CrewAI package for the **service-desk-api** monorepo: **L1SupportFlow** in `flow.py` (Intake → route → diagnostics stub → synthesis → Jira comment). The worker imports `service_desk_crew` after `pip install -e ./service-desk-crew` from the repo root. See the repository **README** for env vars and smoke tests.
 
